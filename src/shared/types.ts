@@ -24,6 +24,7 @@ export const DEFAULT_PROVIDERS: Provider[] = [
   { id: 'claude', name: 'Claude Code', command: 'claude', resumeArgs: '--continue', promptArg: '' },
   { id: 'codex', name: 'Codex CLI', command: 'codex', resumeArgs: 'resume --last', promptArg: '' },
   { id: 'gemini', name: 'Gemini CLI', command: 'gemini', promptArg: '-i' },
+  { id: 'pi', name: 'Pi Coding Agent', command: 'pi', resumeArgs: '--continue', promptArg: '' },
   { id: 'shell', name: 'Plain shell', command: '' }
 ]
 

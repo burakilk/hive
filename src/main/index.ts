@@ -502,7 +502,7 @@ function startAgent(id: string, resume: boolean, prompt?: string, forkArgs?: str
   const effort = agent.effort || getState().projectSettings[agent.projectId]?.effort || provider.effort || ''
   const model = agent.model?.trim() || provider.model?.trim()
   const env: Record<string, string> = { ...secretEnv(agent.projectId), ...accountEnv(agent) }
-  if (model && !forkArgs) extraArgs = `${extraArgs ?? ''} ${provider.id === 'claude' ? '--model' : '-m'} '${model.replace(/'/g, '')}'`.trim()
+  if (model && !forkArgs) extraArgs = `${extraArgs ?? ''} ${provider.id === 'claude' || provider.id === 'pi' ? '--model' : '-m'} '${model.replace(/'/g, '')}'`.trim()
   if (effort && provider.id === 'codex') extraArgs = `${extraArgs ?? ''} -c model_reasoning_effort='"${effort}"'`.trim()
   if (effort && provider.id === 'claude') env.MAX_THINKING_TOKENS = String({ low: 4000, medium: 16000, high: 31999 }[effort])
   // linked folders: the agent may work in these too
