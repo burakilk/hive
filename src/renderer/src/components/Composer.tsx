@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { PromptPicker, promptFor, sendPrompt } from './Library'
 import { FigmaButton } from './More'
 import { useStore } from '../store'
+import { useLayout } from '../layout'
 import { Recorder } from '../dictation'
 import { Icon, cleanError } from './common'
 import { SketchEditor } from './Sketch'
@@ -41,6 +42,9 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
     }
   }, [text]) // eslint-disable-line react-hooks/exhaustive-deps
   const [shots, setShots] = useState<Shot[]>([])
+  const [files, setFiles] = useState<{ path: string; name: string }[]>([])
+  const attachPaths = (paths: string[]): void =>
+    setFiles((x) => [...x, ...paths.filter((p) => !x.some((f) => f.path === p)).map((p) => ({ path: p, name: p.split(/[\\/]/).pop() || p }))])
   const [picker, setPicker] = useState<{ x: number; y: number } | null>(null)
   const [rec, setRec] = useState<'idle' | 'rec' | 'busy'>('idle')
   const [level, setLevel] = useState(0)
@@ -98,12 +102,24 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
   const message = (override?: string): string => {
     const t = (override ?? text).trim()
     const att = shots.map((s) => `[Screenshot: ${s.path}]`).join('\n')
-    return [t, att && `${att}\n(Look at the attached image file${shots.length > 1 ? 's' : ''}.)`].filter(Boolean).join('\n\n')
+    const fl = files.map((f) => `[File: ${f.path}]`).join('\n')
+    return [
+      t,
+      att && `${att}\n(Look at the attached image file${shots.length > 1 ? 's' : ''}.)`,
+      fl && `${fl}\n(Read the attached file${files.length > 1 ? 's' : ''}.)`
+    ].filter(Boolean).join('\n\n')
   }
 
   const send = async (mode: 'auto' | 'queue' = 'auto', override?: string): Promise<void> => {
     const m = message(override)
     if (!m) return
+    // built-in commands draw their output (dialogs, pickers, /usage…) only in the TUI –
+    // in the conversation view show the live terminal for them until they finish
+    const cmd = m.match(/^\/([\w:-]+)\s*$|^\/([\w:-]+)\s/)
+    const name = cmd?.[1] ?? cmd?.[2]
+    const builtin = !!name && (BUILTIN_SLASH[agent?.providerId ?? ''] ?? []).some((c) => c.name === name) && !custom.some((c) => c.name === name)
+    const st = useStore.getState()
+    const chatMode = useLayout.getState().focusMode === 'chat'
     try {
       if (!running) {
         await window.api.startAgent(agentId, false)
@@ -112,12 +128,21 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
       } else if (mode === 'queue' || (busy && queueWhenBusy)) {
         await window.api.queue.add(agentId, m)
       } else {
-        // bracketed paste keeps multi-line prompts in one message for TUIs like Claude Code
-        window.api.input(agentId, m.includes('\n') ? `\x1b[200~${m}\x1b[201~` : m)
-        setTimeout(() => window.api.input(agentId, '\r'), 80)
+        // a dialog is still open in the TUI – close it first or the text lands in the dialog
+        const panelOpen = !!st.livePanels[agentId] && !busy
+        if (panelOpen) window.api.input(agentId, '\x1b')
+        st.setLivePanel(agentId, builtin && chatMode ? name! : null)
+        const type = (): void => {
+          // bracketed paste keeps multi-line prompts in one message for TUIs like Claude Code
+          window.api.input(agentId, m.includes('\n') ? `\x1b[200~${m}\x1b[201~` : m)
+          setTimeout(() => window.api.input(agentId, '\r'), 80)
+        }
+        if (panelOpen) setTimeout(type, 150)
+        else type()
       }
       setText('')
       setShots([])
+      setFiles([])
       setUndo(null)
     } catch (e) {
       toast(cleanError(e), 'error')
@@ -129,15 +154,34 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
     if (s) setShots((x) => [...x, s])
   }
 
-  const addFiles = async (files: FileList | File[]): Promise<boolean> => {
+  /** images become thumbnails (you can draw on them); any other file is attached by its path */
+  const addFiles = async (list: FileList | File[]): Promise<boolean> => {
     let any = false
-    for (const f of Array.from(files)) {
-      if (!f.type.startsWith('image/')) continue
+    for (const f of Array.from(list)) {
       any = true
-      const a = await window.api.media.saveImage(new Uint8Array(await f.arrayBuffer()), f.type.split('/')[1] || 'png')
-      setShots((x) => [...x, a])
+      try {
+        if (f.type.startsWith('image/') && f.type !== 'image/svg+xml') {
+          const a = await window.api.media.saveImage(new Uint8Array(await f.arrayBuffer()), f.type.split('/')[1] || 'png')
+          setShots((x) => [...x, a])
+          continue
+        }
+        const p = window.api.media.pathForFile(f)
+        if (p) attachPaths([p])
+        else {
+          const saved = await window.api.media.saveFile(new Uint8Array(await f.arrayBuffer()), f.name || 'file')
+          setFiles((x) => [...x, saved])
+        }
+      } catch (e) {
+        toast(`${f.name}: ${cleanError(e)}`, 'error')
+      }
     }
     return any
+  }
+
+  const pickFiles = async (): Promise<void> => {
+    const paths = await window.api.media.pickFiles().catch((e) => (toast(cleanError(e), 'error'), [] as string[]))
+    if (paths.length) attachPaths(paths)
+    ta.current?.focus()
   }
 
   const mic = async (): Promise<void> => {
@@ -180,7 +224,17 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
     }
   }
 
-  const queue = rt?.queue ?? []
+  // stop what the agent is doing right now (same as Esc in the CLI); the conversation stays
+  // queued messages are put on hold too, so the next one doesn't go out right after you stopped it
+  const interrupt = (): void => {
+    window.api.input(agentId, '\x1b')
+    if (queue.length && !held) void window.api.queue.edit(agentId, { hold: true })
+    toast(queue.length ? `Stopping ${agent?.name ?? 'the agent'} – queue on hold` : `Stopping ${agent?.name ?? 'the agent'}…`, 'info')
+  }
+
+  // a stopped agent keeps its unsent messages (from the runtime, or stored on the agent after a restart of Hive)
+  const queue = (rt?.running ? rt.queue : rt?.queue ?? agent?.queue) ?? []
+  const held = !!(rt?.running ? rt.queueHeld : rt?.queueHeld ?? agent?.queueHeld)
   return (
     <div className={`composer ${compact ? 'compact' : ''}`}
       onDragOver={(e) => e.dataTransfer.types.includes('Files') && e.preventDefault()}
@@ -192,8 +246,13 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
       {queue.length > 0 && (
         <div className="queue">
           <div className="queue-head">
-            <Icon name="list" size={12} /> Queued · sent one by one when {agent?.name} is free
+            <Icon name={held ? 'pause' : 'list'} size={12} />
+            {held ? <>On hold · nothing is sent until you resume</>
+              : running ? <>Queued · sent one by one when {agent?.name} is free</>
+              : <>Queued · sent when {agent?.name} starts again</>}
             <div className="spacer" />
+            {held && <button className="link-btn" onClick={() => window.api.queue.edit(agentId, { hold: false })}><Icon name="play" size={11} /> Resume</button>}
+            {!held && running && <button className="link-btn" title="Don't send these for now" onClick={() => window.api.queue.edit(agentId, { hold: true })}>Hold</button>}
             <button className="link-btn" onClick={() => window.api.queue.edit(agentId, { clear: true })}>Clear</button>
           </div>
           {queue.map((q, i) => (
@@ -213,6 +272,17 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
           setShots((x) => x.map((s, j) => (j === sketch.i ? a : s)))
           setSketch(null)
         }} />
+      )}
+      {files.length > 0 && (
+        <div className="att-files">
+          {files.map((f) => (
+            <span key={f.path} className="att-file" title={f.path}>
+              <Icon name="paperclip" size={11} />
+              <span className="att-name">{f.name}</span>
+              <button title="Remove" onClick={() => setFiles((x) => x.filter((y) => y.path !== f.path))}><Icon name="x" size={10} /></button>
+            </span>
+          ))}
+        </div>
       )}
       {shots.length > 0 && (
         <div className="shots">
@@ -249,10 +319,11 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
         }
         onChange={(e) => setText(e.target.value)}
         onPaste={async (e) => {
-          const files = Array.from(e.clipboardData.files)
-          if (files.some((f) => f.type.startsWith('image/'))) {
+          const pasted = Array.from(e.clipboardData.files)
+          // pasted files (images or anything copied in Finder); plain text pastes as usual
+          if (pasted.length) {
             e.preventDefault()
-            await addFiles(files)
+            await addFiles(pasted)
           }
         }}
         onKeyDown={(e) => {
@@ -276,6 +347,11 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
               return
             }
           }
+          if (e.key === 'Escape' && busy && !text.trim() && !shots.length && !files.length) {
+            e.preventDefault()
+            interrupt()
+            return
+          }
           if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
             e.preventDefault()
             if ((e.metaKey || e.ctrlKey) && running) {
@@ -285,6 +361,7 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
                 setTimeout(() => window.api.input(agentId, '\r'), 80)
                 setText('')
                 setShots([])
+                setFiles([])
               }
             } else send()
           }
@@ -305,6 +382,9 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
               else setText(promptFor(p.body, agent))
             }} />
         )}
+        <button className="icon-btn" title="Attach files – or drop / paste them into the box" onClick={pickFiles}>
+          <Icon name="paperclip" size={15} />
+        </button>
         <button className="icon-btn" title="Attach a screenshot (⌘⇧2 works anywhere) – or paste / drop an image" onClick={screenshot}>
           <Icon name="camera" size={15} />
         </button>
@@ -327,11 +407,16 @@ export function Composer({ agentId, compact }: { agentId: string; compact?: bool
         )}
         <div className="spacer" />
         {running && busy && (
-          <button className="btn ghost sm" disabled={!text.trim() && !shots.length} title="Add to queue" onClick={() => send('queue')}>
+          <button className="btn ghost sm" disabled={!text.trim() && !shots.length && !files.length} title="Add to queue" onClick={() => send('queue')}>
             <Icon name="list" size={13} /> Queue
           </button>
         )}
-        <button className="send" disabled={!text.trim() && !shots.length} onClick={() => send()} title={running ? 'Send' : 'Start with this task'}>
+        {busy && (
+          <button className="send stop" title="Stop – cancel what the agent is doing now (Esc). The conversation is kept." onClick={interrupt}>
+            <Icon name="stop" size={14} />
+          </button>
+        )}
+        <button className="send" disabled={!text.trim() && !shots.length && !files.length} onClick={() => send()} title={running ? 'Send' : 'Start with this task'}>
           <Icon name={running ? 'send' : 'play'} size={16} />
         </button>
       </div>

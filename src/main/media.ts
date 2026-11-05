@@ -49,6 +49,16 @@ export async function captureScreen(): Promise<Attachment | null> {
   return { path: file, dataUrl: await preview(file) }
 }
 
+/** Save a file pasted into the composer that has no path on disk (keeps its name). */
+export function saveAttachment(data: Uint8Array, name: string): { path: string; name: string } {
+  const safe = name.replace(/[/\\:\0]/g, '_').slice(-120) || 'file'
+  const sub = join(dir(), randomUUID().slice(0, 8))
+  mkdirSync(sub, { recursive: true })
+  const file = join(sub, safe)
+  writeFileSync(file, data)
+  return { path: file, name: safe }
+}
+
 /** Save an image pasted / dropped into the composer. */
 export async function saveImage(data: Uint8Array, ext = 'png'): Promise<Attachment> {
   const file = join(dir(), `img-${randomUUID().slice(0, 8)}.${ext.replace(/[^a-z0-9]/gi, '') || 'png'}`)

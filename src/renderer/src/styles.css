@@ -208,6 +208,8 @@ h2 { font-size: 15px; margin: 0; font-weight: 600; }
 .send { width: 34px; height: 34px; border-radius: 10px; border: 0; display: grid; place-items: center; color: var(--on-accent);
   background: linear-gradient(180deg, var(--accent-2), var(--accent)); }
 .send:disabled { background: var(--panel-3); color: var(--dim); }
+.send.stop { background: #ef4444; color: #fff; margin-right: 4px; }
+.send.stop:hover { background: #dc2626; }
 
 .rail { width: 38px; flex: none; border: 0; border-left: 1px solid var(--border); background: var(--bg-2); color: var(--accent-2);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
@@ -1530,6 +1532,16 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
 .shimmer { background: linear-gradient(90deg, var(--muted) 0%, var(--text) 50%, var(--muted) 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: ccShimmer 2s linear infinite; max-width: 640px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @keyframes ccShimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .cc-turn { padding: 10px 0 0 22px; }
+.chat-wrap { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.chat-wrap > .cc, .chat-wrap > .chat-empty { flex: 1; min-height: 0; height: auto; }
+.cc-cmd::before { background: var(--accent-2); }
+.cc-cmd.err::before { background: #f87171; }
+.cc-cmd .cc-line b { color: var(--accent-2); }
+.cc-cmd .cc-out { margin: 4px 0 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
+.cc-live { flex: none; height: min(46vh, 460px); display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--bg); }
+.cc-live-head { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.cc-live-head .spacer { flex: 1; }
+.cc-live-term { flex: 1; min-height: 0; position: relative; }
 .cc-hello { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .cc-hello b { font-size: 16px; }
 .cc-todos li.completed i { text-decoration: none; }
@@ -1558,3 +1570,28 @@ body.resizing-y, body.resizing-y * { cursor: row-resize !important; user-select:
 .model-pop input { height: 30px; padding: 4px 8px; font-size: 12px; }
 .model-pop .seg button { width: auto; flex: 1; padding: 0 10px; font-size: 12px; }
 .model-pop p { margin: 0; }
+
+/* ---------- composer: attached files ---------- */
+.att-files { display: flex; gap: 6px; padding: 10px 12px 0; flex-wrap: wrap; }
+.att-file { display: inline-flex; align-items: center; gap: 6px; max-width: 260px; padding: 3px 4px 3px 8px; border-radius: 7px; border: 1px solid var(--border-2); background: var(--bg-2); font-size: 12px; color: var(--text); }
+.att-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-file button { flex: none; width: 18px; height: 18px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0; background: none; color: var(--muted); cursor: pointer; }
+.att-file button:hover { background: var(--panel-3); color: var(--text); }
+
+/* clickable file paths in chats / docs */
+.md-body code.md-path { cursor: pointer; color: var(--accent-2); }
+.md-body code.md-path:hover, .cc a:hover { text-decoration: underline; }
+
+/* images attached to a chat message */
+.cc-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.cc-user .cc-images:first-child { margin-top: 0; }
+.cc-image { display: block; max-width: min(100%, 520px); max-height: 340px; border-radius: 6px; border: 1px solid var(--border-2); cursor: zoom-in; object-fit: contain; background: var(--bg); }
+.cc-image-loading { width: 120px; height: 72px; background: var(--border-2); opacity: .4; }
+.cc-image-zoom { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0, 0, 0, .78); cursor: zoom-out; }
+.cc-image-zoom img { max-width: 100%; max-height: 100%; border-radius: 6px; box-shadow: 0 8px 40px rgba(0, 0, 0, .5); }
+
+/* a startup question from the CLI (trust this folder?) answered in the chat */
+.cc-ask { flex: none; margin: 10px 16px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--warn, #f59e0b); background: color-mix(in srgb, var(--warn, #f59e0b) 8%, var(--panel)); }
+.cc-ask-head { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.cc-ask p { margin: 6px 0; overflow-wrap: anywhere; }
+.cc-ask-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }

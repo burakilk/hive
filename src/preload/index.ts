@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent, webFrame } from 'electron'
+import { contextBridge, ipcRenderer, IpcRendererEvent, webFrame, webUtils } from 'electron'
 import type { UsageReport } from '@shared/usage'
 import type { Conversation } from '@shared/chat'
 import type { ProcInfo } from '@shared/procs'
@@ -39,6 +39,7 @@ const api = {
   /** custom slash commands / skills / prompts the agent's CLI offers */
   slashCommands: (id: string): Promise<{ name: string; desc: string; source: string }[]> => ipcRenderer.invoke('agent:slashCommands', id),
   input: (id: string, data: string): void => ipcRenderer.send('agent:input', id, data),
+  answerAsk: (id: string, yes: boolean): Promise<void> => ipcRenderer.invoke('agent:answerAsk', id, yes),
   resize: (id: string, cols: number, rows: number): void => ipcRenderer.send('agent:resize', id, cols, rows),
 
   gitSummary: (id: string): Promise<GitSummary> => ipcRenderer.invoke('git:summary', id),
@@ -87,7 +88,7 @@ const api = {
   },
   queue: {
     add: (agentId: string, text: string): Promise<string> => ipcRenderer.invoke('queue:add', agentId, text),
-    edit: (agentId: string, op: { remove?: string; up?: string; sendNow?: string; clear?: boolean; update?: { id: string; text: string } }): Promise<void> =>
+    edit: (agentId: string, op: { remove?: string; up?: string; sendNow?: string; clear?: boolean; update?: { id: string; text: string }; hold?: boolean }): Promise<void> =>
       ipcRenderer.invoke('queue:edit', agentId, op)
   },
   conversation: (agentId: string): Promise<Conversation & { none?: boolean }> => ipcRenderer.invoke('agent:conversation', agentId),
@@ -117,6 +118,18 @@ const api = {
     screenshot: (): Promise<{ path: string; dataUrl: string } | null> => ipcRenderer.invoke('media:screenshot'),
     readImage: (path: string): Promise<string> => ipcRenderer.invoke('media:readImage', path),
     saveImage: (data: Uint8Array, ext: string): Promise<{ path: string; dataUrl: string }> => ipcRenderer.invoke('media:saveImage', data, ext),
+    /** any file without a path on disk (e.g. pasted) → saved copy */
+    saveFile: (data: Uint8Array, name: string): Promise<{ path: string; name: string }> => ipcRenderer.invoke('media:saveFile', data, name),
+    /** native "choose files" dialog; [] when cancelled */
+    pickFiles: (): Promise<string[]> => ipcRenderer.invoke('media:pickFiles'),
+    /** real path of a dropped / pasted File ('' when it has none) */
+    pathForFile: (f: File): string => {
+      try {
+        return webUtils.getPathForFile(f)
+      } catch {
+        return ''
+      }
+    },
     micAccess: (): Promise<boolean> => ipcRenderer.invoke('media:micAccess'),
     transcribe: (wav: Uint8Array): Promise<string> => ipcRenderer.invoke('media:transcribe', wav),
     onAttach: (cb: (a: { path: string; dataUrl: string }) => void) => on('media:attach', cb)
@@ -198,6 +211,7 @@ const api = {
     read: (root: string, rel: string): Promise<{ content: string; binary: boolean; tooLarge: boolean; size: number }> =>
       ipcRenderer.invoke('fs:read', root, rel),
     readOptional: (root: string, rel: string): Promise<string | null> => ipcRenderer.invoke('fs:readOptional', root, rel),
+    firstExisting: (paths: string[]): Promise<{ path: string; dir: boolean } | null> => ipcRenderer.invoke('fs:firstExisting', paths),
     write: (root: string, rel: string, content: string): Promise<void> => ipcRenderer.invoke('fs:write', root, rel, content),
     create: (root: string, rel: string, dir: boolean): Promise<void> => ipcRenderer.invoke('fs:create', root, rel, dir),
     move: (root: string, from: string, to: string): Promise<void> => ipcRenderer.invoke('fs:move', root, from, to),

@@ -79,25 +79,37 @@ function codexMeta(path: string): { cwd?: string; at: number } {
 
 export const geminiProjectDir = (cwd: string): string => join(geminiHome(), 'tmp', createHash('sha256').update(cwd).digest('hex'), 'chats')
 
-/** Session files of `kind` started in `cwd` after `sinceMs` (newest last). */
-export function findSessions(kind: 'codex' | 'gemini', cwd: string, sinceMs: number): string[] {
+/** Codex session file by its id (the notify payload's "thread-id"); undefined if not found. */
+export function codexSessionById(id: string): string | undefined {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return undefined
+  return walkCodex(Date.now() - 30 * 86400000).find((p) => p.endsWith(`${id}.jsonl`))
+}
+
+/** Session files of `kind` started in `cwd` after `sinceMs` (oldest first), with their start time. */
+export function findSessionsTimed(kind: 'codex' | 'gemini', cwd: string, sinceMs: number): { path: string; at: number }[] {
   if (kind === 'codex') {
     return walkCodex(sinceMs)
-      .map((p) => ({ p, m: codexMeta(p) }))
+      .map((path) => ({ path, m: codexMeta(path) }))
       .filter((x) => x.m.cwd === cwd && x.m.at >= sinceMs - 60_000)
-      .sort((a, b) => a.m.at - b.m.at)
-      .map((x) => x.p)
+      .map((x) => ({ path: x.path, at: x.m.at }))
+      .sort((a, b) => a.at - b.at)
   }
   const dir = geminiProjectDir(cwd)
   if (!existsSync(dir)) return []
   return readdirSync(dir)
     .filter((f) => f.endsWith('.json'))
     .map((f) => join(dir, f))
-    .map((p) => ({ p, t: statSync(p).birthtimeMs || statSync(p).mtimeMs }))
-    .filter((x) => x.t >= sinceMs - 60_000)
-    .sort((a, b) => a.t - b.t)
-    .map((x) => x.p)
+    .map((path) => {
+      const st = statSync(path)
+      return { path, at: st.birthtimeMs || st.mtimeMs }
+    })
+    .filter((x) => x.at >= sinceMs - 60_000)
+    .sort((a, b) => a.at - b.at)
 }
+
+/** Session files of `kind` started in `cwd` after `sinceMs` (oldest first). */
+export const findSessions = (kind: 'codex' | 'gemini', cwd: string, sinceMs: number): string[] =>
+  findSessionsTimed(kind, cwd, sinceMs).map((x) => x.path)
 
 // ---------- parsing ----------
 type Parsed = { conv: Conversation; usage: OtherUsageEntry[] }

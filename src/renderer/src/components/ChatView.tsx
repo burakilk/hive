@@ -6,6 +6,8 @@ import { useStore } from '../store'
 import { Icon } from './common'
 import { fmtTok } from './UsageView'
 import { speak } from '../speech'
+import { linkClick, markPaths } from '../links'
+import { Terminal } from './Terminal'
 
 const md = new Marked({ gfm: true, breaks: true })
 const html = (s: string): string => DOMPurify.sanitize(md.parse(s, { async: false }) as string)
@@ -178,6 +180,125 @@ function ToolRow({ it, cwd, pending }: { it: ChatItem; cwd: string; pending: boo
   )
 }
 
+/** A slash command run in the CLI, with what it printed ("/model opus → Set model to …"). */
+/**
+ * Absolute (or ~/) image file paths written in a message. Paths may contain spaces
+ * ("Application Support"), so a path runs from a "/" at a word start to the first image extension.
+ */
+const IMG_PATH = /(?<=^|[\s`(\[:"'*])~?\/(?:(?![ \t][/~]|, |\.[ \t])[^\n`"'<>()[\]*])*?\.(?:png|jpe?g|gif|webp)(?!\w|\.\w)/gi
+export function imagePaths(text: string): string[] {
+  return [...new Set(text.match(IMG_PATH) ?? [])].slice(0, 12)
+}
+
+/** An image in a message: a data: URL, or a file loaded through main. quiet = hide it if it can't be read. */
+function ChatImage({ src, quiet }: { src: string; quiet?: boolean }) {
+  const [url, setUrl] = useState(src.startsWith('data:') ? src : '')
+  const [failed, setFailed] = useState(false)
+  const [big, setBig] = useState(false)
+  useEffect(() => {
+    if (src.startsWith('data:')) return setUrl(src)
+    let live = true
+    window.api.media.readImage(src).then(
+      (u) => live && (u && u !== 'data:image/png;base64,' ? setUrl(u) : setFailed(true)),
+      () => live && setFailed(true)
+    )
+    return () => {
+      live = false
+    }
+  }, [src])
+  useEffect(() => {
+    if (!big) return
+    const esc = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setBig(false)
+    }
+    window.addEventListener('keydown', esc)
+    return () => window.removeEventListener('keydown', esc)
+  }, [big])
+  if (failed && quiet) return null
+  if (failed) return <span className="cc-image-missing muted small">🖼 {src.split('/').pop()} (not found)</span>
+  if (!url) return <span className="cc-image cc-image-loading" />
+  return (
+    <>
+      <img className="cc-image" src={url} alt="" onClick={(e) => (e.stopPropagation(), setBig(true))} />
+      {big && (
+        <div className="cc-image-zoom" onClick={(e) => (e.stopPropagation(), setBig(false))}>
+          <img src={url} alt="" />
+        </div>
+      )}
+    </>
+  )
+}
+
+function CommandRow({ it }: { it: ChatItem }) {
+  return (
+    <div className={`cc-item cc-cmd ${it.error ? 'err' : ''}`}>
+      <div className="cc-line">
+        <b className="mono">/{it.tool}</b>
+        {it.text && <span className="cc-arg mono" title={it.text}>{it.text}</span>}
+      </div>
+      {it.result && <Output text={it.result} lines={10} />}
+    </div>
+  )
+}
+
+/**
+ * Built-in commands like /usage, /status or /model open a dialog that exists only in the
+ * TUI (nothing reaches the transcript until it closes) – show the live terminal for it.
+ */
+function LivePanel({ agentId, conv }: { agentId: string; conv: Conversation | null }) {
+  const panel = useStore((s) => s.livePanels[agentId])
+  const close = useStore((s) => s.setLivePanel)
+  // the command finished and its output reached the transcript → the chat shows it now
+  const done = !!panel && !!conv?.items.some((x) => x.kind === 'command' && x.tool === panel.cmd && x.result !== undefined && x.at >= panel.since - 3000)
+  useEffect(() => {
+    if (done) close(agentId, null)
+  }, [done, agentId, close])
+  if (!panel || done) return null
+  return (
+    <div className="cc-live">
+      <div className="cc-live-head">
+        <b className="mono">/{panel.cmd}</b>
+        <span className="muted small">live from the terminal – use the keyboard here</span>
+        <div className="spacer" />
+        <button className="btn ghost sm" title="Send Esc to close the dialog" onClick={() => {
+          window.api.input(agentId, '\x1b')
+          close(agentId, null)
+        }}>Esc</button>
+        <button className="icon-btn" title="Hide" onClick={() => close(agentId, null)}><Icon name="x" size={12} /></button>
+      </div>
+      <div className="cc-live-term"><Terminal agentId={agentId} autoFocus /></div>
+    </div>
+  )
+}
+
+/** A question the CLI asks in the terminal before the session starts ("trust this folder?") – answered from the chat. */
+function AskCard({ agentId }: { agentId: string }) {
+  const ask = useStore((s) => s.runtimes[agentId]?.ask)
+  const cwd = useStore((s) => {
+    const a = s.app.agents.find((x) => x.id === agentId)
+    return a?.worktreePath ?? s.app.projects.find((p) => p.id === a?.projectId)?.path ?? ''
+  })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => setBusy(false), [ask?.question])
+  if (!ask) return null
+  const answer = (yes: boolean): void => {
+    setBusy(true)
+    void window.api.answerAsk(agentId, yes)
+  }
+  return (
+    <div className="cc-ask">
+      <div className="cc-ask-head"><Icon name="lock" size={14} /> <b>Claude Code is waiting for you</b></div>
+      <p>{ask.question}</p>
+      {cwd && <p className="mono small muted">{cwd}</p>}
+      <p className="muted small">Only trust folders whose code you know – Claude Code may run commands and read files there. Your first message is sent after you answer.</p>
+      <div className="cc-ask-btns">
+        <button className="btn" disabled={busy} onClick={() => answer(true)}>Yes, trust this folder</button>
+        <button className="btn ghost" disabled={busy} onClick={() => answer(false)}>No, exit</button>
+      </div>
+    </div>
+  )
+}
+
 /** The agent's session as a conversation – styled like Claude Code in VS Code. */
 export function ChatView({ agentId, conv }: { agentId: string; conv: (Conversation & { none?: boolean }) | null }) {
   const end = useRef<HTMLDivElement>(null)
@@ -192,7 +313,9 @@ export function ChatView({ agentId, conv }: { agentId: string; conv: (Conversati
     window.api.agentCwd(agentId).then(setCwd).catch(() => undefined)
   }, [agentId])
   const items = conv?.items ?? []
-  const rendered = useMemo(() => items.map((it) => (it.kind === 'tool' ? '' : html(it.text))), [items])
+  const rendered = useMemo(() => items.map((it) => (it.kind === 'tool' || it.kind === 'command' ? '' : markPaths(html(it.text)))), [items])
+  // image files named in the text ("Screenshot: /…/qa-shots/x.png") show as pictures too
+  const named = useMemo(() => items.map((it) => (it.kind === 'user' || it.kind === 'assistant' ? imagePaths(it.text).filter((p) => !it.images?.includes(p)) : [])), [items])
   useEffect(() => {
     if (stick.current) end.current?.scrollIntoView({ block: 'end' })
   }, [items.length, status])
@@ -202,19 +325,25 @@ export function ChatView({ agentId, conv }: { agentId: string; conv: (Conversati
   if (!conv) return <div className="chat-empty muted">Loading conversation…</div>
   if (conv.none || !items.length)
     return (
-      <div className="chat-empty">
-        <div className="cc-hello">
-          <b>{agent.name}</b>
-          <span className="muted">{agent.role} · {agent.providerId === 'claude' ? 'Claude Code' : agent.providerId === 'codex' ? 'Codex' : 'Gemini'}</span>
-          <p className="muted small">Ask for a change below – the conversation shows up here.</p>
+      <div className="chat-wrap">
+        <div className="chat-empty">
+          <div className="cc-hello">
+            <b>{agent.name}</b>
+            <span className="muted">{agent.role} · {agent.providerId === 'claude' ? 'Claude Code' : agent.providerId === 'codex' ? 'Codex' : 'Gemini'}</span>
+            <p className="muted small">Ask for a change below – the conversation shows up here.</p>
+          </div>
         </div>
+        <AskCard agentId={agentId} />
+        <AskCard agentId={agentId} />
+    <LivePanel agentId={agentId} conv={conv} />
       </div>
     )
   const lastUser = items.map((x) => x.kind).lastIndexOf('user')
   const working = status === 'working'
 
   return (
-    <div className="cc" onScroll={(e) => {
+    <div className="chat-wrap">
+    <div className="cc" onClick={(e) => linkClick(e, cwd)} onScroll={(e) => {
       const el = e.currentTarget
       stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
     }}>
@@ -222,14 +351,27 @@ export function ChatView({ agentId, conv }: { agentId: string; conv: (Conversati
         {items.map((it, i) =>
           it.kind === 'user' ? (
             <div key={i} className="cc-user">
-              <div className="md-body chat-body" dangerouslySetInnerHTML={{ __html: rendered[i] }} />
+              {it.text && <div className="md-body chat-body" dangerouslySetInnerHTML={{ __html: rendered[i] }} />}
+              {it.images?.length || named[i].length ? (
+                <div className="cc-images">
+                  {(it.images ?? []).map((src, k) => <ChatImage key={k} src={src} />)}
+                  {named[i].map((src) => <ChatImage key={src} src={src} quiet />)}
+                </div>
+              ) : null}
               {it.at ? <time>{new Date(it.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time> : null}
             </div>
+          ) : it.kind === 'command' ? (
+            <CommandRow key={i} it={it} />
           ) : it.kind === 'tool' ? (
             <ToolRow key={i} it={it} cwd={cwd} pending={working && i > lastUser && it.result === undefined && i === items.length - 1} />
           ) : (
             <div key={i} className="cc-item cc-text">
               <div className="md-body chat-body" dangerouslySetInnerHTML={{ __html: rendered[i] }} />
+              {named[i].length ? (
+                <div className="cc-images">
+                  {named[i].map((src) => <ChatImage key={src} src={src} quiet />)}
+                </div>
+              ) : null}
               <button className={`icon-btn chat-speak ${speaking === i ? 'on' : ''}`} title={speaking === i ? 'Stop reading' : 'Read aloud'} onClick={() => {
                 if (speaking === i) {
                   window.speechSynthesis?.cancel()
@@ -254,6 +396,8 @@ export function ChatView({ agentId, conv }: { agentId: string; conv: (Conversati
         {status === 'waiting' && items[items.length - 1]?.kind !== 'user' && <div className="cc-turn muted small">Waiting for your reply</div>}
         <div ref={end} />
       </div>
+    </div>
+    <LivePanel agentId={agentId} conv={conv} />
     </div>
   )
 }

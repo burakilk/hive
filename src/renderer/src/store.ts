@@ -11,6 +11,9 @@ interface Store {
   runtimes: Record<string, AgentRuntime>
   serverRuntimes: Record<string, ServerRuntime>
   lastLines: Record<string, string>
+  /** chat view: a slash command whose screen (dialog / picker) only exists in the TUI – shown live */
+  livePanels: Record<string, { cmd: string; since: number }>
+  setLivePanel: (agentId: string, cmd: string | null) => void
   selectedProjectId: string | null
   focusedAgentId: string | null
   view: View
@@ -102,6 +105,11 @@ export const useStore = create<Store>((set, get) => ({
   serverRuntimes: {},
   runtimes: {},
   lastLines: {},
+  livePanels: {},
+  setLivePanel: (agentId, cmd) => {
+    const { [agentId]: _, ...rest } = get().livePanels
+    set({ livePanels: cmd ? { ...rest, [agentId]: { cmd, since: Date.now() } } : rest })
+  },
   selectedProjectId: null,
   focusedAgentId: null,
   view: 'room',

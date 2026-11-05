@@ -3,6 +3,7 @@ import { Marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useStore } from '../store'
 import { Icon, cleanError } from './common'
+import { agentRoot, linkClick } from '../links'
 import { Character } from './Character'
 
 const md = new Marked({ gfm: true, breaks: true })
@@ -53,7 +54,7 @@ export function AskBubble() {
             if (e.key === 'Escape') close()
           }} />
         {busy && <div className="ask-wait"><span className="dots"><i /><i /><i /></span> Thinking with {agent.name}'s context…</div>}
-        {a && <div className="md-body ask-answer" dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(md.parse(a, { async: false }) as string) }} />}
+        {a && <div className="md-body ask-answer" onClick={(e) => linkClick(e, () => agentRoot(agent.id))} dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(md.parse(a, { async: false }) as string) }} />}
         <div className="modal-foot">
           <button className="btn ghost" onClick={close}>Close</button>
           <button className="btn" disabled={!q.trim() || busy} onClick={ask}><Icon name="bubble" size={14} /> Ask</button>

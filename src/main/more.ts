@@ -17,6 +17,7 @@ import { saveImage } from './media'
 import { findSessions } from './otherclis'
 import { showQaBrowser } from './browser'
 import { seedNewProject } from './projectTeam'
+import { currentSession } from './transcript'
 
 const shellRun = (cmd: string, cwd?: string, timeout = 300_000): Promise<string> =>
   new Promise((resolve, reject) =>
@@ -256,8 +257,7 @@ export function registerMore(ctx: FeatureCtx): { onData: (agentId: string, data:
     const cur = resolveAccountId(a)
     const i = pool.findIndex((x) => (x?.id ?? undefined) === cur)
     const next = pool.length > 1 ? pool[(i + 1) % pool.length] : null
-    const sessions = a.sessions ?? []
-    const last = sessions[sessions.length - 1]
+    const last = currentSession(a.sessions)
     if (next !== null && next?.id !== cur) {
       // carry the conversation over to the other account's config folder
       let resumeArgs: string | undefined

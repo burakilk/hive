@@ -78,6 +78,10 @@ export interface Agent {
   paused?: boolean
   /** agent this one was forked from */
   forkedFrom?: string
+  /** queued messages not sent yet – survive stopping the agent and quitting Hive */
+  queue?: QueuedMessage[]
+  /** queue on hold (Stop was pressed) */
+  queueHeld?: boolean
   createdAt: number
 }
 
@@ -89,10 +93,14 @@ export interface AgentRuntime {
   exitCode?: number
   /** Why the process ended with an error (shown in the UI) */
   exitReason?: string
-  /** messages waiting to be typed in, oldest first */
+  /** messages waiting to be typed in, oldest first (kept while the agent is stopped) */
   queue?: QueuedMessage[]
+  /** the queue is on hold (you pressed Stop) – nothing goes out until you resume it */
+  queueHeld?: boolean
   /** a project pause is waiting for this agent's turn to finish */
   pausing?: boolean
+  /** the CLI shows a startup question in the terminal (e.g. "trust this folder?") – nothing is typed in until it is answered */
+  ask?: { kind: 'trust'; question: string }
 }
 
 export interface QueuedMessage {

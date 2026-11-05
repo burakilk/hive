@@ -213,7 +213,7 @@ export function registerExtras(ctx: FeatureCtx): { dispose: () => void; commitNo
     const t = a?.sessions?.[a.sessions.length - 1]
     if (!a || !t) return
     const conv = await readConversation(t)
-    const msgs = conv.items.filter((i) => i.kind !== 'tool').slice(-16)
+    const msgs = conv.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').slice(-16)
     if (!msgs.length) return
     const note = [
       `Hive · ${a.name} (${a.role}) · session ${t.split('/').pop()?.replace('.jsonl', '')}`,

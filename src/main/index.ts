@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, shell } from 'electron'
 import { basename, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
-import { cpSync, existsSync } from 'fs'
+import { cpSync, existsSync, statSync } from 'fs'
 import { execFile } from 'child_process'
 import { AgentManager } from './agents'
 import { getState, loadState, mergeProviders, updateState } from './store'
@@ -17,13 +17,15 @@ import { registerExtras } from './extras'
 import { registerMocks } from './mock'
 import { registerInsights, secretEnv, secretValues } from './insights'
 import { registerRemote } from './remote'
-import { findSessions } from './otherclis'
+import { codexSessionById, findSessionsTimed } from './otherclis'
+import { currentSession } from './transcript'
 import { accountEnv, registerMore } from './more'
 import { copyTeam, seedNewProject, teamSource } from './projectTeam'
 import { utf8Locale } from './agents'
 import { registerUpdater } from './updater'
 import { createTray } from './tray'
 import { childrenOf, handleMcpHttp, initTeam, mcpArgsFor, codexMcpArgs, wouldCycle } from './team'
+import { cleanToolList } from '@shared/library'
 import { Agent, AgentPatch, AgentRuntime, AppSettings, DevServer, Provider, NewAgentInput, Project, RoleDef, SavedPrompt } from '@shared/types'
 
 let win: BrowserWindow | null = null
@@ -305,6 +307,8 @@ function registerIpc(): void {
       ...src,
       id: randomUUID(),
       name: `${src.name} (copy)`,
+      queue: undefined,
+      queueHeld: undefined,
       branch: undefined,
       worktreePath: undefined,
       createdAt: Date.now()
@@ -324,6 +328,7 @@ function registerIpc(): void {
   ipcMain.handle('clipboard:write', (_e, text: string) => clipboard.writeText(text))
   ipcMain.handle('agent:buffer', (_e, id: string) => agents.buffer(id))
   ipcMain.on('agent:input', (_e, id: string, data: string) => agents.write(id, data))
+  ipcMain.handle('agent:answerAsk', (_e, id: string, yes: boolean) => agents.answerAsk(id, yes))
   ipcMain.on('agent:resize', (_e, id: string, cols: number, rows: number) => agents.resize(id, cols, rows))
 
   ipcMain.handle('git:summary', (_e, id: string) => git.summary(agentCwd(findAgent(id))))
@@ -466,6 +471,17 @@ function registerIpc(): void {
   ipcMain.handle('fs:listAll', (_e, root: string) => files.listAll(root))
   ipcMain.handle('fs:readOptional', (_e, root: string, rel: string) => files.readOptional(root, rel))
   ipcMain.handle('fs:read', (_e, root: string, rel: string) => files.read(root, rel))
+  /** first of these absolute paths that exists (for links in chats / docs) */
+  ipcMain.handle('fs:firstExisting', (_e, paths: string[]) => {
+    for (const p of paths.slice(0, 24)) {
+      try {
+        return { path: p, dir: statSync(p).isDirectory() }
+      } catch {
+        /* next */
+      }
+    }
+    return null
+  })
   ipcMain.handle('fs:write', (_e, root: string, rel: string, content: string) => files.write(root, rel, content))
   ipcMain.handle('fs:create', (_e, root: string, rel: string, dir: boolean) => files.create(root, rel, dir))
   ipcMain.handle('fs:move', (_e, root: string, from: string, to: string) => files.move(root, from, to))
@@ -495,6 +511,9 @@ function startAgent(id: string, resume: boolean, prompt?: string, forkArgs?: str
     const q = `'${role.instructions.trim().replace(/'/g, `'\\''`)}'`
     extraArgs = `${extraArgs ?? ''} --append-system-prompt ${q}`.trim()
   }
+  // tools the role may not use (e.g. a read-only role: Edit,Write)
+  const blocked = provider.id === 'claude' && role?.blockedTools ? cleanToolList(role.blockedTools) : ''
+  if (blocked) extraArgs = `${extraArgs ?? ''} --disallowedTools '${blocked.replace(/'/g, '')}'`.trim()
   // answer language (Claude Code)
   const lang = getState().settings.agentLanguage
   if (provider.id === 'claude' && lang) extraArgs = `${extraArgs ?? ''} --append-system-prompt '${`Always write your replies to the user in ${lang}.`.replace(/'/g, `'\\''`)}'`.trim()
@@ -514,7 +533,30 @@ function startAgent(id: string, resume: boolean, prompt?: string, forkArgs?: str
   }
   if (forkArgs) extraArgs = `${extraArgs ?? ''} ${forkArgs}`.trim()
   if (agent.paused) updateState((s) => s.agents.forEach((a) => a.id === id && delete a.paused))
-  agents.start(agent, provider, cwd, { resume, prompt, extraArgs, env, ssh: agent.ssh })
+  const resumeArgs = resume ? ownResumeArgs(agent, provider, cwd) : undefined
+  agents.start(agent, provider, cwd, { resume, resumeArgs, prompt, extraArgs, env, ssh: agent.ssh })
+}
+
+/**
+ * Resume the agent's OWN conversation. `--continue` / `resume --last` pick the newest
+ * session in the folder – with several agents in one folder that is often another
+ * agent's, which then gets continued (and recorded) under this agent too.
+ * undefined = the provider's generic flags, '' = start fresh.
+ */
+function ownResumeArgs(agent: Agent, provider: Provider, cwd: string): string | undefined {
+  if (provider.id !== 'claude' && provider.id !== 'codex') return undefined
+  const mine = (agent.sessions ?? []).filter((p) => (provider.id === 'codex') === /rollout-[^/\\]*\.jsonl$/.test(p))
+  // remote agents' transcripts live on the other machine: the last one announced
+  const last = agent.ssh ? mine[mine.length - 1] : currentSession(mine)
+  if (last) {
+    if (provider.id === 'claude') return `--resume ${basename(last, '.jsonl')}`
+    const id = basename(last).match(/([0-9a-f-]{36})\.jsonl$/)?.[1]
+    if (id) return `resume ${id}`
+  }
+  const shared = getState().agents.some(
+    (a) => a.id !== agent.id && a.providerId === agent.providerId && !!a.ssh === !!agent.ssh && agentCwd(a) === cwd
+  )
+  return shared ? '' : undefined
 }
 
 async function removeAgent(agent: Agent, project: Project): Promise<void> {
@@ -537,14 +579,22 @@ app.whenReady().then(async () => {
   const port = await startHookServer((agentId, event, payload) => {
     agents?.handleHook(agentId, event)
     automation?.onHook(agentId, event, payload)
-    // remember this agent's Claude Code transcript for usage / cost
-    const t = typeof payload.transcript_path === "string" ? resolve(payload.transcript_path) : undefined
+    // remember this agent's transcript for usage / cost (Codex: its notify payload names the session)
+    const thread = (payload as Record<string, unknown>)['thread-id']
+    const t =
+      typeof payload.transcript_path === 'string'
+        ? resolve(payload.transcript_path)
+        : typeof thread === 'string'
+          ? codexSessionById(thread)
+          : undefined
     if (t) {
       const a = getState().agents.find((x) => x.id === agentId)
-      if (a && !(a.sessions ?? []).includes(t)) {
+      // a resumed session moves back to the end
+      const list = a?.sessions ?? []
+      if (a && list[list.length - 1] !== t) {
         updateState((s) => {
           const x = s.agents.find((y) => y.id === agentId)
-          if (x) x.sessions = [...(x.sessions ?? []), t].slice(-200)
+          if (x) x.sessions = [...(x.sessions ?? []).filter((p) => p !== t), t].slice(-200)
         })
       }
     }
@@ -563,6 +613,15 @@ app.whenReady().then(async () => {
         }),
       onRuntime,
       onPaused: (agentId) => features?.onPaused(agentId),
+      onQueue: (agentId, queue, held) =>
+        updateState((s) => {
+          const a = s.agents.find((x) => x.id === agentId)
+          if (!a) return
+          if (queue.length) a.queue = queue.map((q) => ({ ...q }))
+          else delete a.queue
+          if (held && queue.length) a.queueHeld = true
+          else delete a.queueHeld
+        }),
       onResumeFailed: (agentId) => {
         try {
           startAgent(agentId, false)
@@ -592,17 +651,27 @@ app.whenReady().then(async () => {
   automation = registerAutomation(fctx)
   extras = registerExtras(fctx)
   registerMocks({ send, broadcastState })
-  // Codex / Gemini have no SessionStart hook: find their session files by folder + start time
+  // Codex / Gemini have no SessionStart hook: find their session files by folder + start time.
+  // A file belongs to the agent in that folder that started last before it – not to every
+  // agent started earlier (two agents in one folder would otherwise take each other's).
   setInterval(() => {
     const st = getState()
     const owned = new Set(st.agents.flatMap((a) => a.sessions ?? []))
-    for (const a of st.agents) {
-      if ((a.providerId !== 'codex' && a.providerId !== 'gemini') || a.ssh || !agents.isRunning(a.id)) continue
-      const since = agents.startedAt(a.id) ?? Date.now()
-      const fresh = findSessions(a.providerId, agentCwd(a), since).filter((p) => !owned.has(p))
+    const live = st.agents
+      .filter((a) => (a.providerId === 'codex' || a.providerId === 'gemini') && !a.ssh && agents.isRunning(a.id))
+      .map((a) => ({ a, cwd: agentCwd(a), since: agents.startedAt(a.id) ?? Date.now() }))
+    for (const me of live) {
+      const fresh = findSessionsTimed(me.a.providerId as 'codex' | 'gemini', me.cwd, me.since)
+        .filter((f) => !owned.has(f.path))
+        .filter((f) => {
+          const starters = live.filter((o) => o.a.providerId === me.a.providerId && o.cwd === me.cwd && o.since - 60_000 <= f.at)
+          const latest = starters.reduce((x, y) => (y.since > x.since ? y : x), me)
+          return latest.a.id === me.a.id
+        })
+        .map((f) => f.path)
       if (!fresh.length) continue
       updateState((s) => {
-        const x = s.agents.find((y) => y.id === a.id)
+        const x = s.agents.find((y) => y.id === me.a.id)
         if (x) x.sessions = [...(x.sessions ?? []), ...fresh].slice(-200)
       })
       fresh.forEach((p) => owned.add(p))

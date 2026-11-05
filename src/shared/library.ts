@@ -12,6 +12,8 @@ export interface RoleDef {
   color: string
   /** extra instructions given to the agent's CLI for every session (Claude Code: --append-system-prompt) */
   instructions: string
+  /** tools agents with this role may not use, comma separated (Claude Code: --disallowedTools), e.g. "Edit,Write" */
+  blockedTools?: string
 }
 
 /** Variables usable in prompts: {{agent}} {{role}} {{branch}} {{project}} */
@@ -168,6 +170,8 @@ export const DEFAULT_SKILLS: Skill[] = [
 
 /** More roles to add from the gallery (Library → Roles → Browse roles) */
 export const ROLE_GALLERY: RoleDef[] = [
+  { id: "rc-database-analyst", name: "Database Analyst", color: "#06b6d4", blockedTools: "Edit,Write,NotebookEdit", instructions:
+      "You are a database analyst. Your only job is running database queries and reporting the results – you do not write or change code, config or files.\n\nRules:\n- READ-ONLY by default: SELECT / find / aggregate / EXPLAIN only. Never run INSERT, UPDATE, DELETE, MERGE, TRUNCATE, DROP, ALTER, CREATE, GRANT or anything else that changes data or schema unless the user explicitly asks for that exact change in the current message – then show the statement first and wait for confirmation.\n- Treat every database as production. Always limit result sets (TOP / LIMIT / .limit(), default 100 rows), avoid full scans on large tables when an index or date filter can be used, and set a statement timeout where the client allows it.\n- Use the command-line client that fits the database (psql, mysql, sqlcmd, mongosh, redis-cli, clickhouse-client…). Take connection details from environment variables or the project's config; never print passwords or full connection strings.\n- Before a non-trivial query, look at the schema (tables, columns, indexes) instead of guessing names.\n- Reply with: the query you ran, a short result table (or the count / aggregate), and one or two sentences of interpretation. If the user may want to run it themselves, give the query in a code block." },
   { id: "rc-product-manager", name: "Product Manager", color: "#f59e0b", instructions:
       "You are the product manager. Turn vague requests into clear, small tickets with acceptance criteria. Read the codebase before proposing anything, point out unknowns and trade-offs, and do not write production code yourself." },
   { id: "rc-tech-lead-architect", name: "Tech Lead / Architect", color: "#8b5cf6", instructions:
@@ -203,13 +207,17 @@ export const ROLE_GALLERY: RoleDef[] = [
 ]
 
 /** share format: a role (or several) as text you can paste anywhere */
-export const encodeRoles = (roles: RoleDef[]): string => `hive-roles:${btoa(unescape(encodeURIComponent(JSON.stringify(roles.map(({ name, color, instructions }) => ({ name, color, instructions }))))))}`
+export const encodeRoles = (roles: RoleDef[]): string => `hive-roles:${btoa(unescape(encodeURIComponent(JSON.stringify(roles.map(({ name, color, instructions, blockedTools }) => ({ name, color, instructions, ...(blockedTools ? { blockedTools } : {}) }))))))}`
+/** "Edit, Write  NotebookEdit" -> "Edit,Write,NotebookEdit" (tool names and permission rules like Bash(rm:*) only) */
+export const cleanToolList = (s: string): string =>
+  (s.match(/[A-Za-z_][\w-]*(?:\([^()'"\n]*\))?/g) ?? []).slice(0, 40).join(',')
+
 export function decodeRoles(text: string): Omit<RoleDef, 'id'>[] {
   const t = text.trim()
   const raw = t.startsWith('hive-roles:') ? decodeURIComponent(escape(atob(t.slice(11)))) : t
   const j = JSON.parse(raw) as unknown
   const list = (Array.isArray(j) ? j : [j]) as Partial<RoleDef>[]
-  return list.filter((r) => typeof r.name === 'string' && r.name.trim()).map((r) => ({ name: String(r.name).slice(0, 60), color: /^#[0-9a-f]{6}$/i.test(String(r.color)) ? String(r.color) : '#8b7cf6', instructions: String(r.instructions ?? '').slice(0, 8000) }))
+  return list.filter((r) => typeof r.name === 'string' && r.name.trim()).map((r) => ({ name: String(r.name).slice(0, 60), color: /^#[0-9a-f]{6}$/i.test(String(r.color)) ? String(r.color) : '#8b7cf6', instructions: String(r.instructions ?? '').slice(0, 8000), ...(r.blockedTools ? { blockedTools: cleanToolList(String(r.blockedTools)) } : {}) }))
 }
 
 /** an agent definition to share: name, role (with its instructions), colour, CLI and first task */

@@ -457,10 +457,18 @@ const TR: Record<string, string> = {
   "Used from the next start.": "Bir sonraki başlatmada kullanılır.",
   "Claude switches the model right away.": "Claude modeli hemen değiştirir.",
   "The agent restarts and keeps its conversation.": "Ajan yeniden başlar, konuşması korunur.",
+  "Stop – cancel what the agent is doing now (Esc). The conversation is kept.": "Durdur – ajanın şu an yaptığını iptal et (Esc). Konuşma korunur.",
+  "Attach files – or drop / paste them into the box": "Dosya ekle – ya da kutuya sürükle / yapıştır",
+  "On hold · nothing is sent until you resume": "Beklemede · devam ettirene kadar hiçbir şey gönderilmez",
+  "Don't send these for now": "Bunları şimdilik gönderme",
+  "Hold": "Beklet",
   "Change this agent's model and reasoning effort": "Bu ajanın modelini ve eforunu değiştir"
 }
 
 const PATTERNS: [RegExp, (...m: string[]) => string][] = [
+  [/^Not found: (.+)$/, (_, p) => `Bulunamadı: ${p}`],
+  [/^Stopping (.+) – queue on hold$/, (_, n) => `${n} durduruluyor – kuyruk beklemede`],
+  [/^Queued · sent when (.+) starts again$/, (_, n) => `Kuyrukta · ${n} yeniden başlayınca gönderilir`],
   [/^New projects start with a copy of these agents \(names, roles, CLIs, who leads whom\)\. Default: your first project with agents(?: – now (.+))?\.$/, (_, n) => `Yeni projeler bu ajanların bir kopyasıyla başlar (isim, rol, CLI, kim kime bağlı). Varsayılan: ajanı olan ilk projen${n ? ` – şu an ${n}` : ''}.`],
   [/^Add the agents from (.+) \((\d+)\)$/, (_, p, n) => `${p} projesinin ajanlarını ekle (${n})`],
   [/^Added (\d+) agents? from (.+)$/, (_, n, p) => `${p} projesinden ${n} ajan eklendi`],

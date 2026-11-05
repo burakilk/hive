@@ -256,6 +256,12 @@ export default function CodeView() {
             saved.current.set(path, model.getAlternativeVersionId())
           }
         } catch (e) {
+          // a link to a folder: show it in the tree instead
+          if (/EISDIR|is a directory/i.test(String((e as Error)?.message ?? e))) {
+            setOpen((o) => new Set([...o, path]))
+            if (!tree[path]) loadDir(path)
+            return
+          }
           toast(cleanError(e), 'error')
           return
         }
@@ -554,7 +560,7 @@ export default function CodeView() {
         <div className={`editor-body md-${isMd ? L.mdMode : 'none'}`} style={{ display: activeTab?.kind === 'text' ? 'flex' : 'none' }}>
           <div className="monaco-host" ref={host} />
           {isMd && L.mdMode !== 'edit' && activeModel && (
-            <MarkdownPreview model={activeModel} path={active!} onOpen={(p) => openFile(p)} />
+            <MarkdownPreview model={activeModel} path={active!} root={root} />
           )}
         </div>
         {!active && (

@@ -3,6 +3,7 @@ import { Marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { useStore } from '../store'
 import { Icon, cleanError } from './common'
+import { agentRoot, linkClick } from '../links'
 import { Character } from './Character'
 
 const md = new Marked({ gfm: true, breaks: true })
@@ -107,7 +108,7 @@ export function PlanReviewModal() {
             <p className="muted small">Comment on steps, edit, reorder, add or remove them, then approve – or send it back with your notes.</p>
           </div>
         </div>
-        <div className="plan-steps">
+        <div className="plan-steps" onClick={(e) => linkClick(e, () => agentRoot(agent.id))}>
           {steps.map((s, i) =>
             s.kind === 'head' ? (
               <h3 key={i}>{s.text}</h3>

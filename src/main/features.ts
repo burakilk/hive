@@ -6,20 +6,20 @@
 import { BrowserWindow, globalShortcut, ipcMain, Notification, powerSaveBlocker, session, systemPreferences } from 'electron'
 import { copyFileSync, existsSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
-import { basename, join } from 'path'
+import { basename, join, resolve } from 'path'
 import { randomUUID } from 'crypto'
 import type { Agent, McpServerDef, Project, Schedule, Skill, Task, TaskStatus } from '@shared/types'
 import { nextRun } from '@shared/schedule'
 import { expandRefs } from '@shared/library'
 import { getState, updateState } from './store'
-import type { AgentManager } from './agents'
+import { applyQueueOp, type AgentManager, type QueueOp } from './agents'
 import type { ServerManager } from './servers'
 import * as git from './git'
-import { readConversation } from './transcript'
+import { currentSession, readConversation } from './transcript'
 import { askSide, commitMessage, enhancePrompt } from './ai'
 import { killProc, scan } from './watchdog'
 import { listIssues } from './github'
-import { captureScreen, saveImage, transcribe } from './media'
+import { captureScreen, saveAttachment, saveImage, transcribe } from './media'
 
 export interface FeatureCtx {
   agents: AgentManager
@@ -37,7 +37,7 @@ export const fill = (tpl: string, t: Task): string =>
   tpl.replace(/\{\{title\}\}/g, t.title).replace(/\{\{body\}\}/g, t.body || '(no details)') +
   (t.effort === 'high' ? '\n\nultrathink' : t.effort === 'medium' ? '\n\nThink hard about this.' : '')
 const sessionIdOf = (a: Agent): string | undefined => {
-  const t = a.sessions?.[a.sessions.length - 1]
+  const t = currentSession(a.sessions)
   return t ? basename(t, '.jsonl') : undefined
 }
 const claudeProjectDir = (cwd: string): string =>
@@ -152,12 +152,28 @@ export function registerFeatures(ctx: FeatureCtx): { dispose: () => void; onPaus
     }
     return agents.deliver(agentId, text, { queueOnly: true })
   })
-  ipcMain.handle('queue:edit', (_e, agentId: string, op: Parameters<AgentManager['editQueue']>[1]) => agents.editQueue(agentId, op))
+  ipcMain.handle('queue:edit', (_e, agentId: string, op: QueueOp) => {
+    if (agents.editQueue(agentId, op)) return
+    // stopped agent: edit its stored queue; "send now" starts it with that message
+    const a = ctx.findAgent(agentId)
+    const r = applyQueueOp(a.queue ?? [], !!a.queueHeld, op)
+    updateState((s) => {
+      const x = s.agents.find((y) => y.id === agentId)
+      if (!x) return
+      if (r.queue.length) x.queue = r.queue
+      else delete x.queue
+      if (r.held) x.queueHeld = true
+      else delete x.queueHeld
+    })
+    agents.showStoredQueue(agentId, r.queue, r.held)
+    ctx.broadcastState()
+    if (r.send) ctx.startAgent(agentId, false, r.send.text)
+  })
 
   // ---------- conversation & context ----------
   ipcMain.handle('agent:conversation', async (_e, id: string) => {
     const a = ctx.findAgent(id)
-    const t = a.sessions?.[a.sessions.length - 1]
+    const t = currentSession(a.sessions)
     if (!t) return { items: [], context: null, none: true }
     return readConversation(t)
   })
@@ -181,6 +197,8 @@ export function registerFeatures(ctx: FeatureCtx): { dispose: () => void; onPaus
       paused: undefined,
       forkedFrom: src.id,
       initialPrompt: undefined,
+      queue: undefined,
+      queueHeld: undefined,
       createdAt: Date.now()
     }
     // a fork of an isolated agent gets its own branch, starting from the source's branch
@@ -189,7 +207,7 @@ export function registerFeatures(ctx: FeatureCtx): { dispose: () => void; onPaus
     const cwd = ctx.agentCwd(agent)
     if (cwd !== srcCwd) {
       // Claude looks sessions up per folder – copy the transcript next to the new folder
-      const from = src.sessions![src.sessions!.length - 1]
+      const from = currentSession(src.sessions)!
       const dir = claudeProjectDir(cwd)
       mkdirSync(dir, { recursive: true })
       if (existsSync(from)) copyFileSync(from, join(dir, `${sid}.jsonl`))
@@ -318,10 +336,22 @@ export function registerFeatures(ctx: FeatureCtx): { dispose: () => void; onPaus
   })
   ipcMain.handle('media:readImage', async (_e, path: string) => {
     const { nativeImage, app } = await import('electron')
-    if (!path.startsWith(join(app.getPath('userData'), 'attachments'))) throw new Error('Not an attachment')
-    return nativeImage.createFromPath(path).toDataURL()
+    // any image file (screenshots in replies may live in qa-shots, the project, /tmp…) – never other files
+    const p = resolve(path.replace(/^~(?=\/)/, homedir()))
+    if (!/\.(png|jpe?g|gif|webp|bmp)$/i.test(p) && !p.startsWith(join(app.getPath('userData'), 'attachments'))) throw new Error('Not an image')
+    const img = nativeImage.createFromPath(p)
+    if (img.isEmpty()) throw new Error('Image not found')
+    return img.toDataURL()
   })
   ipcMain.handle('media:saveImage', (_e, data: Uint8Array, ext: string) => saveImage(data, ext))
+  ipcMain.handle('media:saveFile', (_e, data: Uint8Array, name: string) => saveAttachment(data, name))
+  ipcMain.handle('media:pickFiles', async () => {
+    const { dialog } = await import('electron')
+    const w = ctx.win()
+    const opts = { title: 'Attach files', properties: ['openFile', 'multiSelections'] as ('openFile' | 'multiSelections')[] }
+    const r = w ? await dialog.showOpenDialog(w, opts) : await dialog.showOpenDialog(opts)
+    return r.canceled ? [] : r.filePaths
+  })
   ipcMain.handle('media:micAccess', async () => {
     if (process.platform !== 'darwin') return true
     if (systemPreferences.getMediaAccessStatus('microphone') === 'granted') return true

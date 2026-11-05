@@ -34,6 +34,8 @@ interface Session {
   pendingPrompt?: string
   /** messages typed in one by one whenever the agent is free */
   queue: QueuedMessage[]
+  /** queue on hold: nothing goes out until resumed (set by Stop / interrupt) */
+  held?: boolean
   /** stop after the current turn (project pause) */
   pauseRequested?: boolean
   command: string
@@ -56,6 +58,29 @@ export interface AgentManagerEvents {
   onResumeFailed: (agentId: string) => void
   /** a pause request finished: the agent's turn ended and it was stopped */
   onPaused?: (agentId: string) => void
+  /** the queue changed – store it so it survives stopping the agent / quitting Hive */
+  onQueue?: (agentId: string, queue: QueuedMessage[], held: boolean) => void
+}
+
+export type QueueOp = { remove?: string; up?: string; sendNow?: string; clear?: boolean; update?: { id: string; text: string }; hold?: boolean }
+
+/** remove / reorder / edit / hold – shared by running agents and the stored queue of stopped ones */
+export function applyQueueOp(queue: QueuedMessage[], held: boolean, op: QueueOp): { queue: QueuedMessage[]; held: boolean; send?: QueuedMessage } {
+  let q = [...queue]
+  let h = held
+  const i = (id?: string): number => q.findIndex((x) => x.id === id)
+  if (op.clear) q = []
+  if (op.remove) q = q.filter((x) => x.id !== op.remove)
+  if (op.update && i(op.update.id) >= 0) q[i(op.update.id)] = { ...q[i(op.update.id)], text: op.update.text }
+  if (op.up && i(op.up) > 0) {
+    const k = i(op.up)
+    ;[q[k - 1], q[k]] = [q[k], q[k - 1]]
+  }
+  let send: QueuedMessage | undefined
+  if (op.sendNow && i(op.sendNow) >= 0) [send] = q.splice(i(op.sendNow), 1)
+  if (op.hold !== undefined) h = op.hold
+  if (!q.length) h = false
+  return { queue: q, held: h, send }
 }
 
 export class AgentManager {
@@ -115,7 +140,8 @@ export class AgentManager {
     this.redact = values
   }
 
-  start(agent: Agent, provider: Provider, cwd: string, opts: { resume?: boolean; prompt?: string; extraArgs?: string; env?: Record<string, string>; ssh?: { host: string; path: string } } = {}): void {
+  /** `resumeArgs` replaces the provider's generic resume flags ('' = start a fresh session). */
+  start(agent: Agent, provider: Provider, cwd: string, opts: { resume?: boolean; resumeArgs?: string; prompt?: string; extraArgs?: string; env?: Record<string, string>; ssh?: { host: string; path: string } } = {}): void {
     if (this.sessions.has(agent.id)) return
 
     const isWin = process.platform === 'win32'
@@ -128,7 +154,8 @@ export class AgentManager {
     if (cmd && provider.id === 'codex')
       cmd += ` -c ${quote('notify=["bash","-c","curl -s -m 2 -X POST --data-binary \\"$1\\" http://127.0.0.1:$HIVE_PORT/hook/$HIVE_AGENT_ID/Stop >/dev/null 2>&1 || true","hive"]', false)}`
     if (cmd && opts.extraArgs) cmd += ` ${opts.extraArgs}`
-    if (cmd && opts.resume && provider.resumeArgs) cmd += ` ${provider.resumeArgs}`
+    const resumeArgs = opts.resume ? (opts.resumeArgs ?? provider.resumeArgs) : undefined
+    if (cmd && resumeArgs) cmd += ` ${resumeArgs}`
 
     let pendingPrompt = opts.prompt?.trim() || (!opts.resume && agent.initialPrompt?.trim() ? agent.initialPrompt.trim() : undefined)
     if (cmd && pendingPrompt && provider.promptArg !== undefined) {
@@ -184,7 +211,9 @@ export class AgentManager {
       hookDriven: false,
       providerId: provider.id,
       pendingPrompt,
-      queue: [],
+      // messages left over from the last run continue (unless you put them on hold)
+      queue: [...(agent.queue ?? [])],
+      held: !!agent.queueHeld && !!agent.queue?.length,
       command: cmd,
       resumed: !!opts.resume,
       startedAt: Date.now(),
@@ -193,6 +222,7 @@ export class AgentManager {
     session.screen.loadAddon(session.ser as unknown as Parameters<Screen['loadAddon']>[0])
     this.sessions.set(agent.id, session)
     this.setRuntime(session.runtime)
+    if (session.queue.length) this.emitQueue(session)
     // a task handed over on the command line counts as delivered now (gives the CLI time to start)
     if (opts.prompt) this.deliveredAt.set(agent.id, Date.now() + 4000)
 
@@ -234,7 +264,10 @@ export class AgentManager {
         status,
         exitCode,
         exitReason: status === 'error' ? exitReason(exitCode, session.buffer.slice(-4000), session.command) : undefined,
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        // unsent messages stay visible (and are sent after the next start)
+        queue: session.queue.length ? [...session.queue] : undefined,
+        queueHeld: session.held || undefined
       })
       if (session.restartWith) session.restartWith()
       else if (quickResumeFail) this.events.onResumeFailed(agent.id)
@@ -273,29 +306,30 @@ export class AgentManager {
     return this.sessions.get(agentId)?.queue ?? []
   }
 
-  /** remove / reorder / send-now for queued messages */
-  editQueue(agentId: string, op: { remove?: string; up?: string; sendNow?: string; clear?: boolean; update?: { id: string; text: string } }): void {
+  /** remove / reorder / send-now / hold for queued messages of a running agent (false = not running) */
+  editQueue(agentId: string, op: QueueOp): boolean {
     const s = this.sessions.get(agentId)
-    if (!s) return
-    const i = (id?: string): number => s.queue.findIndex((q) => q.id === id)
-    if (op.clear) s.queue = []
-    if (op.remove) s.queue = s.queue.filter((q) => q.id !== op.remove)
-    if (op.update && i(op.update.id) >= 0) s.queue[i(op.update.id)].text = op.update.text
-    if (op.up && i(op.up) > 0) {
-      const k = i(op.up)
-      ;[s.queue[k - 1], s.queue[k]] = [s.queue[k], s.queue[k - 1]]
-    }
-    if (op.sendNow && i(op.sendNow) >= 0) {
-      const [m] = s.queue.splice(i(op.sendNow), 1)
-      this.type(s, m.text)
-    }
+    if (!s) return false
+    const r = applyQueueOp(s.queue, !!s.held, op)
+    s.queue = r.queue
+    s.held = r.held
+    if (r.send) this.type(s, r.send.text)
     this.emitQueue(s)
+    return true
+  }
+
+  /** a stopped agent's stored queue changed: show it */
+  showStoredQueue(agentId: string, queue: QueuedMessage[], held: boolean): void {
+    const rt = this.runtimes.get(agentId)
+    if (!rt || this.sessions.has(agentId)) return
+    this.setRuntime({ ...rt, queue: queue.length ? queue : undefined, queueHeld: held || undefined })
   }
 
   private emitQueue(s: Session): void {
-    s.runtime = { ...s.runtime, queue: [...s.queue], pausing: !!s.pauseRequested }
+    s.runtime = { ...s.runtime, queue: [...s.queue], queueHeld: s.held || undefined, pausing: !!s.pauseRequested }
     this.runtimes.set(s.runtime.agentId, s.runtime)
     this.events.onRuntime(s.runtime)
+    this.events.onQueue?.(s.runtime.agentId, s.queue, !!s.held)
   }
 
   /** Stop the agent as soon as its current turn is over (queued messages are kept for later). */
@@ -350,6 +384,11 @@ export class AgentManager {
     const s = this.sessions.get(agentId)
     if (!s) return
     s.stopRequested = true
+    // you stopped it: unsent messages wait until you resume them (not sent on the next start)
+    if (s.queue.length && !s.held) {
+      s.held = true
+      this.emitQueue(s)
+    }
     this.kill(s)
   }
 
@@ -432,12 +471,16 @@ export class AgentManager {
     for (const [id, s] of this.sessions) {
       if (s.activityDirty) {
         s.activityDirty = false
-        const a = pickActivity(this.screenLines(id, 80))
+        const lines = this.screenLines(id, 80)
+        const a = pickActivity(lines)
         if (a && a !== s.activity) {
           s.activity = a
           this.events.onActivity(id, a)
         }
+        this.checkAsk(s, lines)
       }
+      // a startup question is on screen: typing the first task / queue would answer it
+      if (s.runtime.ask) continue
       // Codex / Gemini show "esc to interrupt / cancel" while they work: read the screen
       const tuiBusy = s.providerId === 'codex' || s.providerId === 'gemini' ? /esc to (interrupt|cancel)|\(esc to/i.test(this.screenLines(id, 10).join('\n')) : null
       if (tuiBusy === true && !s.pendingPrompt) {
@@ -468,12 +511,44 @@ export class AgentManager {
         this.events.onPaused?.(id)
         continue
       }
+      if (s.held) continue
       const next = s.queue.shift()
       if (next) {
         this.type(s, next.text)
         this.emitQueue(s)
       }
     }
+  }
+
+  /**
+   * Claude Code asks "Is this a project you created or one you trust?" (or to trust the
+   * folder's settings) in the terminal before the session starts – nothing reaches the
+   * transcript, so the chat shows it from the runtime.
+   */
+  private checkAsk(s: Session, lines: string[]): void {
+    if (s.providerId !== 'claude') return
+    const tail = lines.slice(-40)
+    const open = tail.some((l) => /Yes, I trust (this folder|these settings)/i.test(l))
+    // the question wraps over several lines: join them and take the sentence that asks about trust
+    const flat = tail.map((l) => l.replace(/[│╭╮╰╯─]/g, ' ').trim()).join(' ').replace(/\s+/g, ' ')
+    const q = open ? (flat.match(/\b(?:Is|Do) (?:this|you)\b[^?]*\btrust\b[^?]*\?/i)?.[0].trim() ?? 'Do you trust the files in this folder?') : undefined
+    if (q === s.runtime.ask?.question) return
+    s.runtime = { ...s.runtime, ask: q ? { kind: 'trust', question: q.slice(0, 300) } : undefined }
+    if (!q) delete s.runtime.ask
+    this.setRuntime(s.runtime)
+  }
+
+  /** answer the startup question: move the select to "Yes, I trust…" / "No, exit" and press Enter */
+  answerAsk(agentId: string, yes: boolean): void {
+    const s = this.sessions.get(agentId)
+    if (!s?.runtime.ask) return
+    const lines = this.screenLines(agentId, 40)
+    const opts = lines.filter((l) => /(Yes, I trust|No, exit)/i.test(l))
+    const cur = Math.max(0, opts.findIndex((l) => /[❯›>]\s*\d*\.?\s*(Yes|No)/.test(l)))
+    const want = Math.max(0, opts.findIndex((l) => (yes ? /Yes, I trust/i : /No, exit/i).test(l)))
+    const move = want > cur ? '\x1b[B'.repeat(want - cur) : '\x1b[A'.repeat(cur - want)
+    s.pty.write(move)
+    setTimeout(() => this.sessions.get(agentId) === s && s.pty.write('\r'), move ? 120 : 0)
   }
 
   private setStatus(agentId: string, status: AgentStatus): void {

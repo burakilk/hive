@@ -1,7 +1,7 @@
 {
   "name": "hive",
   "productName": "Hive",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Run multiple AI coding agents (Claude Code, Codex, Gemini...) side by side",
   "main": "./out/main/index.js",
   "author": "Fatih Burak İlk",

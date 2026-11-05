@@ -3,6 +3,7 @@ import { Marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { highlightLine, languageFor } from '../components/highlight'
 import type { monaco } from './monaco'
+import { openHref } from '../links'
 
 const marked = new Marked({ gfm: true, breaks: false })
 marked.use({
@@ -15,14 +16,18 @@ marked.use({
   }
 })
 
+/** GitHub-style heading anchor: "Getting Started!" → "getting-started" */
+const slug = (t: string): string => t.trim().toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, '').replace(/\s+/g, '-')
+
 /**
  * Live, sanitised markdown preview of a Monaco model.
- * Links: http(s) open in the browser, relative .md links open in the editor.
+ * Links: http(s) open in the browser; files and folders (relative, root-relative, absolute,
+ * with #L12 / :12 line numbers) open in the editor.
  */
-export function MarkdownPreview({ model, path, onOpen }: {
+export function MarkdownPreview({ model, path, root }: {
   model: monaco.editor.ITextModel
   path: string
-  onOpen: (relPath: string) => void
+  root: string
 }) {
   const [text, setText] = useState(model.getValue())
   const ref = useRef<HTMLDivElement>(null)
@@ -54,14 +59,11 @@ export function MarkdownPreview({ model, path, onOpen }: {
         if (!a) return
         e.preventDefault()
         const href = a.getAttribute('href') ?? ''
-        if (/^https?:\/\//.test(href) || href.startsWith('mailto:')) window.open(href)
-        else if (href.startsWith('#')) ref.current?.querySelector(`[id="${CSS.escape(href.slice(1))}"]`)?.scrollIntoView({ behavior: 'smooth' })
-        else if (href) {
-          const parts = [...(dir ? dir.split('/') : []), ...href.split('#')[0].split('/')]
-          const out: string[] = []
-          for (const p of parts) p === '..' ? out.pop() : p && p !== '.' && out.push(p)
-          onOpen(out.join('/'))
-        }
+        if (href.startsWith('#')) {
+          const id = decodeURIComponent(href.slice(1))
+          const el = ref.current?.querySelector(`[id="${CSS.escape(id)}"]`) ?? [...(ref.current?.querySelectorAll('h1,h2,h3,h4,h5,h6') ?? [])].find((h) => slug(h.textContent ?? '') === id.toLowerCase())
+          el?.scrollIntoView({ behavior: 'smooth' })
+        } else if (href) void openHref(href, root, dir)
       }}
     >
       <article className="md-body" dangerouslySetInnerHTML={{ __html: html }} />

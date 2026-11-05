@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { decodeRoles, encodeRoles, expandRefs, fillPrompt, ROLE_GALLERY, type RoleDef, type SavedPrompt } from '@shared/library'
+import { cleanToolList, decodeRoles, encodeRoles, expandRefs, fillPrompt, ROLE_GALLERY, type RoleDef, type SavedPrompt } from '@shared/library'
 import type { Agent } from '@shared/types'
 import { useStore } from '../store'
 import { Icon, cleanError } from './common'
@@ -158,7 +158,9 @@ function RolesEditor({ items, toast }: { items: RoleDef[]; toast: (t: string, k?
   const users = draft ? agents.filter((a) => a.role === cur?.name).length : 0
   const save = async (): Promise<void> => {
     if (!draft?.name.trim()) return toast('Name is required', 'error')
-    await window.api.library.saveRole({ ...draft, name: draft.name.trim() })
+    const blockedTools = cleanToolList(draft.blockedTools ?? '')
+    const { blockedTools: _drop, ...rest } = draft
+    await window.api.library.saveRole({ ...rest, name: draft.name.trim(), ...(blockedTools ? { blockedTools } : {}) })
     toast(users ? `Role saved – restart its ${users} agent(s) to apply the new instructions` : 'Role saved', 'success')
   }
   const [gallery, setGallery] = useState(false)
@@ -181,7 +183,7 @@ function RolesEditor({ items, toast }: { items: RoleDef[]; toast: (t: string, k?
     }
   }
   const add = async (): Promise<void> => {
-    const r = { id: uid('r'), name: 'New role', color: '#8b7cf6', instructions: '' }
+    const r: RoleDef = { id: uid('r'), name: 'New role', color: '#8b7cf6', instructions: '' }
     await window.api.library.saveRole(r)
     setSel(r.id)
     setDraft(r)
@@ -211,6 +213,10 @@ function RolesEditor({ items, toast }: { items: RoleDef[]; toast: (t: string, k?
           <label>Instructions
             <textarea rows={11} value={draft.instructions} onChange={(e) => setDraft({ ...draft, instructions: e.target.value })}
               placeholder="How should an agent with this role behave? E.g. focus areas, rules, what not to touch." />
+          </label>
+          <label>Blocked tools
+            <input value={draft.blockedTools ?? ''} onChange={(e) => setDraft({ ...draft, blockedTools: e.target.value })}
+              placeholder="e.g. Edit,Write,NotebookEdit – Claude Code agents with this role can't use these" spellCheck={false} />
           </label>
           <p className="muted small" style={{ margin: 0 }}>
             Claude Code agents get these instructions in every session (as an extra system prompt). Used by {users} agent{users === 1 ? '' : 's'}.

@@ -13,7 +13,7 @@ import type { FeatureCtx } from './features'
 import type { HookEvent, HookPayload } from './hooks'
 import * as git from './git'
 import { usageReport } from './usage'
-import { readConversation } from './transcript'
+import { currentSession, readConversation } from './transcript'
 import { fill, handTo } from './features'
 import { runClaude } from './ai'
 
@@ -192,7 +192,7 @@ export function registerAutomation(ctx: FeatureCtx): {
   }
 
   async function lastReply(a: Agent): Promise<string> {
-    const t = a.sessions?.[a.sessions.length - 1]
+    const t = currentSession(a.sessions)
     if (a.providerId === 'claude' && t) {
       const conv = await readConversation(t)
       const last = [...conv.items].reverse().find((i) => i.kind === 'assistant')
@@ -355,7 +355,7 @@ export function registerAutomation(ctx: FeatureCtx): {
           ctx.send('toast', `🐤 ${a.name}: no output for 10 minutes – it may be stuck`)
         }
       } else stuckWarned.delete(id)
-      const path = a.sessions?.[a.sessions.length - 1]
+      const path = currentSession(a.sessions)
       if (!path) continue
       try {
         const c = (await readConversation(path)).context
